@@ -95,6 +95,8 @@ class DRIForesightProcessor:
                     return f"Could not extract text from {file.name}"
         except Exception as e:
             return f"Error extracting text from {file.name}: {str(e)}"
+        
+
 
     def generate_domain_map(self, domain: str, document_text: str, project_name: str) -> Dict[str, Any]:
         """Generate domain map based on the selected domain and document content."""
@@ -1622,6 +1624,269 @@ class DRIForesightProcessor:
                 "key_indicators": [f"Signs of {focus_area}", "System metric changes"]
             }
 
+
+
+    # Add this method to your DRIForesightProcessor class in main.py
+
+    def run_wind_tunnel_analysis(self, domain: str, policy_text: str, phase3_scenarios: Dict, project_name: str = "") -> Dict[str, Any]:
+        """
+        Run Wind Tunnel analysis - stress test policy against all Phase 3 scenarios.
+        
+        Args:
+            domain: The project domain
+            policy_text: Extracted text from uploaded policy documents
+            phase3_scenarios: Dict containing baseline and alternative scenarios from Phase 3
+            project_name: Optional project name for context
+        
+        Returns:
+            Dict with analysis for each scenario and cross-scenario insights
+        """
+        
+        # Extract scenarios from Phase 3 data
+        baseline_scenario = phase3_scenarios.get('baseline_scenario', {})
+        alternative_scenarios = phase3_scenarios.get('alternative_scenarios', {}).get('scenarios', [])
+        
+        # Organize scenarios by archetype
+        scenarios_to_analyze = {
+            'baseline': {
+                'title': baseline_scenario.get('scenario_title', 'Baseline Scenario'),
+                'text': baseline_scenario.get('scenario_text', ''),
+                'type': 'Baseline'
+            }
+        }
+        
+        # Add alternative scenarios
+        for scenario in alternative_scenarios:
+            archetype = scenario.get('archetype', '').lower().replace(' ', '_')
+            if archetype == 'collapse':
+                scenarios_to_analyze['collapse'] = scenario
+            elif archetype == 'new_equilibrium':
+                scenarios_to_analyze['equilibrium'] = scenario
+            elif archetype == 'transformation':
+                scenarios_to_analyze['transformation'] = scenario
+        
+        # Analyze each scenario
+        scenario_analyses = {}
+        
+        for scenario_key, scenario_data in scenarios_to_analyze.items():
+            analysis = self._analyze_policy_against_scenario(
+                domain=domain,
+                policy_text=policy_text,
+                scenario_data=scenario_data,
+                project_name=project_name
+            )
+            scenario_analyses[scenario_key] = analysis
+        
+        # Generate cross-scenario insights
+        cross_scenario_analysis = self._generate_cross_scenario_insights(
+            domain=domain,
+            policy_text=policy_text,
+            scenario_analyses=scenario_analyses,
+            project_name=project_name
+        )
+        
+        return {
+            "scenarios": scenario_analyses,
+            "cross_scenario": cross_scenario_analysis
+        }
+
+    def _analyze_policy_against_scenario(self, domain: str, policy_text: str, scenario_data: Dict, project_name: str = "") -> Dict[str, str]:
+        """Analyze policy against a single scenario using VIABILITY-PROCESS-CAPABILITIES-ADAPTATIONS framework."""
+        
+        scenario_title = scenario_data.get('scenario_title', scenario_data.get('title', 'Scenario'))
+        scenario_text = scenario_data.get('scenario_text', scenario_data.get('text', ''))
+        scenario_type = scenario_data.get('archetype', scenario_data.get('type', 'Unknown'))
+        
+        prompt = f"""
+        You are performing a **Wind Tunnel stress test** of the policy document for "{project_name}" in the "{domain}" domain.
+        
+        POLICY TO ANALYZE:
+        {policy_text[:4000]}
+
+        FUTURE SCENARIO TO TEST AGAINST:
+        Title: {scenario_title}
+        Type: {scenario_type}
+        Description: {scenario_text[:2000]}
+
+        WIND TUNNEL EVALUATION FRAMEWORK:
+        Systematically evaluate this policy against the given scenario using four dimensions:
+
+        ### **1. VIABILITY** (Does the policy achieve its objectives?)
+        - Does the policy achieve its stated objectives in this future scenario?
+        - What aspects of the policy succeed or fail and why?
+        - Are the underlying assumptions still valid?
+        - What unintended consequences emerge?
+
+        ### **2. PROCESS** (How does implementation change?)
+        - How does the implementation process change in this scenario?
+        - What new stakeholders or power dynamics emerge?
+        - Are the planned timelines and milestones still realistic?
+        - What governance or decision-making challenges arise?
+
+        ### **3. CAPABILITIES** (Do we have what we need?)
+        - Do we have the necessary human resources in this future?
+        - Are required technologies and infrastructure available?
+        - Is organizational culture an asset or liability?
+        - What new competencies would be needed?
+
+        ### **4. ADAPTATIONS NEEDED** (How should policy be modified?)
+        - How should the policy be modified to remain effective?
+        - What contingencies or flexibility should be built in?
+        - What early warning indicators should be monitored?
+        - What alternative approaches might work better?
+
+        ANALYSIS REQUIREMENTS:
+        - Be specific and concrete with examples rather than general statements
+        - Ground analysis in the scenario details and policy specifics
+        - Focus on actionable insights for policy resilience
+        - Consider both opportunities and risks in the {scenario_type} scenario
+        - Each dimension should be 80-120 words of substantive analysis
+
+        Format your response as JSON:
+        {{
+            "viability": "Comprehensive analysis of policy effectiveness in this {scenario_type} scenario. Address objective achievement, success/failure factors, assumption validity, and unintended consequences with specific examples from the scenario context.",
+            "process": "Detailed analysis of implementation changes in this {scenario_type} scenario. Cover process modifications, stakeholder dynamics, timeline realism, and governance challenges with concrete examples.", 
+            "capabilities": "Thorough assessment of resource and capability requirements in this {scenario_type} scenario. Evaluate human resources, technology/infrastructure, organizational culture, and new competencies with specific details.",
+            "adaptations_needed": "Specific recommendations for policy modifications in this {scenario_type} scenario. Include effectiveness improvements, contingencies, monitoring indicators, and alternative approaches with actionable suggestions."
+        }}
+
+        Focus on how the unique characteristics of this {scenario_type} scenario create specific challenges and opportunities for the policy.
+        """
+        
+        try:
+            chat_completion = self.client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"""You are an expert policy analyst specializing in Wind Tunnel stress testing methodology. 
+                        You excel at evaluating policy robustness across different future scenarios using concrete, specific analysis 
+                        grounded in scenario details. You provide actionable insights with examples rather than generic assessments. 
+                        Always respond with valid JSON format."""
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                model=self.model,
+                max_tokens=2500,  # Increased for more detailed responses
+                temperature=0.6
+            )
+            
+            response_text = chat_completion.choices[0].message.content
+            parsed_result = self._parse_json_response(response_text)
+            
+            # Validate required fields exist
+            required_fields = ['viability', 'process', 'capabilities', 'adaptations_needed']
+            for field in required_fields:
+                if field not in parsed_result:
+                    parsed_result[field] = f"Analysis pending for {field} in {scenario_type} scenario"
+            
+            return parsed_result
+            
+        except Exception as e:
+            return {
+                "viability": f"Error analyzing viability: {str(e)}",
+                "process": f"Error analyzing process: {str(e)}",
+                "capabilities": f"Error analyzing capabilities: {str(e)}",
+                "adaptations_needed": f"Error generating adaptations: {str(e)}"
+            }
+
+    def _generate_cross_scenario_insights(self, domain: str, policy_text: str, scenario_analyses: Dict, project_name: str = "") -> Dict[str, str]:
+        """Generate cross-scenario insights and policy robustness analysis."""
+        
+        # Format scenario analyses for prompt
+        analyses_text = ""
+        for scenario_name, analysis in scenario_analyses.items():
+            analyses_text += f"\n{scenario_name.upper()} SCENARIO ANALYSIS:\n"
+            analyses_text += f"Viability: {analysis.get('viability', 'N/A')}\n"
+            analyses_text += f"Process: {analysis.get('process', 'N/A')}\n"
+            analyses_text += f"Capabilities: {analysis.get('capabilities', 'N/A')}\n"
+            analyses_text += f"Adaptations: {analysis.get('adaptations_needed', 'N/A')}\n"
+            analyses_text += "---\n"
+        
+        prompt = f"""
+        You are conducting **cross-scenario synthesis** for Wind Tunnel policy stress testing for "{project_name}" in "{domain}".
+
+        POLICY ANALYZED:
+        {policy_text[:2000]}
+
+        INDIVIDUAL SCENARIO ANALYSES:
+        {analyses_text[:6000]}
+
+        CROSS-SCENARIO SYNTHESIS TASK:
+        Compare across ALL scenarios together (not individually) to extract strategic insights:
+
+        ### **Task 1: ROBUST ELEMENTS**
+        Identify which elements of the policy are robust and work well across ALL scenarios.
+        Focus on specific policy components, mechanisms, or approaches that remain effective regardless of future conditions.
+
+        ### **Task 2: SCENARIO-SPECIFIC ELEMENTS** 
+        Note which aspects of the policy only work in specific futures or require different approaches in different scenarios.
+        Be specific about which elements work in which scenarios and why.
+
+        ### **Task 3: CRITICAL VULNERABILITIES**
+        Highlight the biggest failure points, risks, and vulnerabilities that emerge across scenarios.
+        Focus on systemic weaknesses that could undermine policy effectiveness.
+
+        ### **Task 4: MONITORING INDICATORS**
+        Suggest specific, measurable early warning indicators that should be tracked to anticipate which scenario is emerging.
+        Focus on concrete metrics that would signal the need for policy adaptation.
+
+        SYNTHESIS REQUIREMENTS:
+        - Compare patterns and commonalities across all scenario analyses
+        - Be concrete and specific with examples rather than generic statements  
+        - Focus on actionable recommendations for policy resilience
+        - Each response should be 80-120 words of substantive analysis
+        - Ground insights in the specific policy and scenario details provided
+
+        Format as JSON:
+        {{
+            "robust_elements": "Specific policy aspects and mechanisms that demonstrate effectiveness across all scenarios, with concrete examples of why these elements remain viable regardless of future conditions.",
+            "scenario_specific": "Detailed identification of policy elements that only work in certain scenarios, specifying which elements work in which futures and the underlying reasons for scenario dependency.",
+            "critical_vulnerabilities": "Major systemic failure points and risks identified across scenarios, with specific assessment of how these vulnerabilities could undermine policy effectiveness and their potential impact.",
+            "monitoring_indicators": "Concrete, measurable early warning indicators and metrics that should be tracked to anticipate scenario emergence and signal the need for policy adaptation, with specific measurement approaches."
+        }}
+
+        Focus on the most strategically important cross-scenario insights for policy adaptation and long-term resilience.
+        """
+        
+        try:
+            chat_completion = self.client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are a senior strategic policy analyst specializing in cross-scenario synthesis 
+                        and policy resilience assessment. You excel at identifying concrete patterns across different future 
+                        scenarios and translating them into specific, actionable policy insights with examples and evidence. 
+                        Always respond with valid JSON format."""
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                model=self.model,
+                max_tokens=2000,  # Increased for more detailed responses
+                temperature=0.6
+            )
+            
+            response_text = chat_completion.choices[0].message.content
+            parsed_result = self._parse_json_response(response_text)
+            
+            # Validate required fields exist
+            required_fields = ['robust_elements', 'scenario_specific', 'critical_vulnerabilities', 'monitoring_indicators']
+            for field in required_fields:
+                if field not in parsed_result:
+                    parsed_result[field] = f"Analysis pending for {field}"
+            
+            return parsed_result
+            
+        except Exception as e:
+            return {
+                "robust_elements": f"Error in cross-scenario analysis: {str(e)}",
+                "scenario_specific": f"Error in scenario-specific analysis: {str(e)}",
+                "critical_vulnerabilities": f"Error in vulnerability analysis: {str(e)}",
+                "monitoring_indicators": f"Error in indicators analysis: {str(e)}"
+            }
+
+
+
+
 # Utility functions for Streamlit integration
 def get_api_key():
     """Get Groq API key from environment or user input."""
@@ -1633,8 +1898,6 @@ def initialize_processor():
     if not api_key:
         raise ValueError("GROQ_API_KEY environment variable not set")
     return DRIForesightProcessor(api_key)
-
-
 
 
 

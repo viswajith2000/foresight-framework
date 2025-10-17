@@ -1,15 +1,23 @@
+
+
 import os
 import json
-from flask import Flask, render_template, request, jsonify
+# from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, session
 from dotenv import load_dotenv
 from main import DRIForesightProcessor, initialize_processor
+# from policy_stress_test import create_stress_test_processor
+# from google.cloud import translate_v3
+import os
 
+from deep_translator import GoogleTranslator
 
 load_dotenv()
-
+# processor = None
 
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="Templates")
+    app.secret_key = 'dri-foresight-wind-tunnel-2024'
 
     # Initialize processor once per app lifecycle (stateless per request payload)
     try:
@@ -20,17 +28,23 @@ def create_app() -> Flask:
 
     class FlaskFileWrapper:
         """Adapter to make Werkzeug's FileStorage look like our expected file object."""
-
+ 
         def __init__(self, file_storage):
             self._file = file_storage
             self.name = file_storage.filename
-
+ 
         def read(self, *args, **kwargs):
             return self._file.read(*args, **kwargs)
-
+ 
         def seek(self, *args, **kwargs):
             # FileStorage exposes underlying stream with seek
             return self._file.stream.seek(*args, **kwargs)
+       
+        def tell(self, *args, **kwargs):
+            return self._file.tell(*args, **kwargs)
+       
+        def seekable(self, *args, **kwargs):
+            return self._file.seekable(*args, **kwargs)
 
     @app.route("/")
     def index():
@@ -495,6 +509,272 @@ def create_app() -> Flask:
             return jsonify({'error': str(e)}), 500
 
 
+    # Add this route to your app.py file (inside the create_app() function)
+
+    @app.route('/api/wind-tunnel-analysis', methods=['POST'])
+    def wind_tunnel_analysis():
+        """Run Wind Tunnel policy stress testing against Phase 3 scenarios."""
+        if processor is None:
+            return jsonify({"error": "Server not initialized. Check GROQ_API_KEY."}), 500
+
+        try:
+            # Get form data
+            domain = request.form.get('domain', '').strip()
+            project_name = request.form.get('project_name', '').strip()
+            
+            if not domain:
+                return jsonify({'error': 'Domain is required'}), 400
+
+            # Get Phase 3 scenarios data
+            try:
+                phase3_data = json.loads(request.form.get('phase3_scenarios', '{}'))
+            except json.JSONDecodeError:
+                return jsonify({'error': 'Invalid Phase 3 scenarios data'}), 400
+
+            if not phase3_data:
+                return jsonify({'error': 'Phase 3 scenarios data is required'}), 400
+
+            # Process uploaded policy files
+            policy_files = request.files.getlist('policy_files')
+            if not policy_files:
+                return jsonify({'error': 'At least one policy document must be uploaded'}), 400
+
+            # Extract text from all policy files
+            policy_text = ""
+            for policy_file in policy_files:
+                try:
+                    wrapper = FlaskFileWrapper(policy_file)
+                    wrapper.seek(0)
+                    extracted_text = processor.extract_text_from_file(wrapper)
+                    policy_text += f"\n\n=== POLICY DOCUMENT: {policy_file.filename} ===\n"
+                    policy_text += extracted_text
+                    policy_text += "\n" + "="*50 + "\n"
+                except Exception as e:
+                    policy_text += f"\nError extracting from {policy_file.filename}: {str(e)}\n"
+
+            if len(policy_text.strip()) < 100:
+                return jsonify({'error': 'Could not extract sufficient text from policy documents'}), 400
+
+            # Run Wind Tunnel analysis
+            wind_tunnel_results = processor.run_wind_tunnel_analysis(
+                domain=domain,
+                policy_text=policy_text,
+                phase3_scenarios=phase3_data,
+                project_name=project_name
+            )
+
+            if 'error' in wind_tunnel_results:
+                return jsonify({'error': wind_tunnel_results['error']}), 500
+
+            return jsonify({
+                'success': True,
+                'wind_tunnel_analysis': wind_tunnel_results,
+                'analyzed_files': [f.filename for f in policy_files],
+                'policy_text_length': len(policy_text)
+            })
+
+        except Exception as e:
+            app.logger.error(f"Wind Tunnel analysis error: {str(e)}")
+            return jsonify({'error': f'Wind Tunnel analysis failed: {str(e)}'}), 500
+
+# for translation
+    def create_translation_service():
+        """Initialize Google Cloud Translation service"""
+        try:
+            # Set your project ID
+            project_id = "bsai-472610"  # Replace with your project ID
+            
+            # Make sure your Key.json is in the same directory as app.py
+            app_path = os.path.dirname(__file__)
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = f"{app_path}/Key.json"
+            
+            client = translate_v3.TranslationServiceClient()
+            parent = f"projects/{project_id}/locations/global"
+            
+            return client, parent
+        except Exception as e:
+            print(f"Translation service initialization failed: {e}")
+            return None, None
+
+    # Add this new route
+    # @app.route('/api/translate', methods=['POST'])
+    # def translate_text():
+    #     """Translate text from English to Lao"""
+    #     try:
+    #         data = request.get_json()
+    #         text = data.get('text', '').strip()
+    #         target_language = data.get('target_language', 'lo')  # 'lo' is Lao language code
+            
+    #         if not text:
+    #             return jsonify({'error': 'No text provided'}), 400
+            
+    #         client, parent = create_translation_service()
+    #         if not client:
+    #             return jsonify({'error': 'Translation service not available'}), 500
+            
+    #         # Translate text
+    #         response = client.translate_text(
+    #             contents=[text],
+    #             parent=parent,
+    #             mime_type="text/plain",
+    #             source_language_code="en",
+    #             target_language_code=target_language,
+    #         )
+            
+    #         translated_text = response.translations[0].translated_text if response.translations else text
+            
+    #         return jsonify({
+    #             'success': True,
+    #             'original_text': text,
+    #             'translated_text': translated_text,
+    #             'target_language': target_language
+    #         })
+            
+    #     except Exception as e:
+    #         return jsonify({'error': f'Translation failed: {str(e)}'}), 500
+
+
+    @app.route('/api/translate', methods=['POST'])
+    def translate_text_free():
+        """Translate text using free Google Translate via deep_translator"""
+        try:
+            data = request.get_json()
+            text = data.get('text', '').strip()
+            target_language = data.get('target_language', 'lo')
+            source_language = data.get('source_language', 'en')
+            
+            print(f"\n{'='*60}")
+            print(f"[TRANSLATE API CALL]")
+            print(f"  Source: {source_language} → Target: {target_language}")
+            print(f"  Text length: {len(text)} chars")
+            print(f"  Text: {text[:100]}..." if len(text) > 100 else f"  Text: {text}")
+            print(f"{'='*60}")
+            
+            if not text:
+                return jsonify({'error': 'No text provided'}), 400
+            
+            # Validate language codes
+            if not isinstance(target_language, str) or len(target_language) != 2:
+                return jsonify({'error': 'Invalid target language code'}), 400
+            if not isinstance(source_language, str) or len(source_language) != 2:
+                return jsonify({'error': 'Invalid source language code'}), 400
+            
+            try:
+                # Check if already target language
+                if target_language == source_language:
+                    print(f"[SKIP] Source and target are same language: {source_language}")
+                    return jsonify({
+                        'success': True,
+                        'original_text': text,
+                        'translated_text': text,
+                        'target_language': target_language,
+                        'source_language': source_language
+                    })
+                
+                translated_text = GoogleTranslator(
+                    source=source_language,
+                    target=target_language
+                ).translate(text)
+                
+                print(f"[SUCCESS] Translated text: {translated_text[:100]}..." if len(translated_text) > 100 else f"[SUCCESS] Translated text: {translated_text}")
+                
+                return jsonify({
+                    'success': True,
+                    'original_text': text,
+                    'translated_text': translated_text,
+                    'target_language': target_language,
+                    'source_language': source_language
+                })
+                
+            except Exception as e:
+                print(f"[ERROR] Translation failed: {str(e)}")
+                return jsonify({'error': f'Translation failed: {str(e)}'}), 500
+                
+        except Exception as e:
+            print(f"[ERROR] Request processing failed: {str(e)}")
+            return jsonify({'error': f'Request processing failed: {str(e)}'}), 500
+
+    # @app.route('/api/translate', methods=['POST'])
+    # def translate_text_free():
+    #     """Translate text using free Google Translate via deep_translator"""
+    #     try:
+    #         data = request.get_json()
+    #         text = data.get('text', '').strip()
+    #         # txttt = str(data)
+    #         # txttt = txttt[:50]
+    #         # print(f"DEEBAK:\n{txttt}\n")
+    #         target_language = data.get('target_language', 'lo')
+    #         source_language = data.get('source_language', 'en')  # Add this line
+            
+    #         if not text:
+    #             return jsonify({'error': 'No text provided'}), 400
+            
+    #         # Validate language codes
+    #         if not isinstance(target_language, str) or len(target_language) != 2:
+    #             return jsonify({'error': 'Invalid target language code'}), 400
+    #         if not isinstance(source_language, str) or len(source_language) != 2:
+    #             return jsonify({'error': 'Invalid source language code'}), 400
+            
+    #         try:
+    #             # Use deep_translator's GoogleTranslator
+    #             translated_text = GoogleTranslator(
+    #                 source=source_language,
+    #                 target=target_language
+    #             ).translate(text)
+    #             print(f"\ntext:{text}\n")
+    #             print(f"\nlen:{len(text)}\n")
+    #             return jsonify({
+    #                 'success': True,
+    #                 'original_text': text,
+    #                 'translated_text': translated_text,
+    #                 'target_language': target_language,
+    #                 'source_language': source_language
+    #             })
+                
+    #         except Exception as e:
+    #             return jsonify({'error': f'Translation failed: {str(e)}'}), 500
+                
+    #     except Exception as e:
+    #         return jsonify({'error': f'Request processing failed: {str(e)}'}), 500
+
+
+# working code paid
+    # def translate_text():
+    #     """Translate text from English to Lao"""
+    #     try:
+    #         data = request.get_json()
+    #         text = data.get('text', '').strip()
+    #         target_language = data.get('target_language', 'lo')
+    #         mime_type = data.get('mime_type', 'text/plain')  # Add this line
+            
+    #         if not text:
+    #             return jsonify({'error': 'No text provided'}), 400
+            
+    #         client, parent = create_translation_service()
+    #         if not client:
+    #             return jsonify({'error': 'Translation service not available'}), 500
+            
+    #         # Translate text
+    #         response = client.translate_text(
+    #             contents=[text],
+    #             parent=parent,
+    #             mime_type=mime_type,  # Use the provided mime_type
+    #             source_language_code="en",
+    #             target_language_code=target_language,
+    #         )
+            
+    #         translated_text = response.translations[0].translated_text if response.translations else text
+            
+    #         return jsonify({
+    #             'success': True,
+    #             'original_text': text,
+    #             'translated_text': translated_text,
+    #             'target_language': target_language
+    #         })
+            
+    #     except Exception as e:
+    #         return jsonify({'error': f'Translation failed: {str(e)}'}), 500
+    
     return app
 
 
@@ -504,5 +784,3 @@ app = create_app()
 if __name__ == "__main__":
     # Run the Flask development server
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
-
-
